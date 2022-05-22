@@ -213,6 +213,8 @@ int Fl_Window_Driver::set_cursor(const Fl_RGB_Image*, int, int) {
 
 void Fl_Window_Driver::wait_for_expose() {
   if (!shown()) return;
+  hide();
+  show();
   Fl_X *i = Fl_X::i(pWindow);
   while (!i || wait_for_expose_value) {
     Fl::wait();
