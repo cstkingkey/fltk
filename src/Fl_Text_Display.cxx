@@ -1,5 +1,5 @@
 //
-// Copyright 2001-2021 by Bill Spitzak and others.
+// Copyright 2001-2022 by Bill Spitzak and others.
 // Original code Copyright Mark Edel.  Permission to distribute under
 // the LGPL for the FLTK library granted by Mark Edel.
 //
@@ -97,6 +97,8 @@ static int scroll_x = 0;
 Fl_Text_Display::Fl_Text_Display(int X, int Y, int W, int H, const char* l)
 : Fl_Group(X, Y, W, H, l) {
 
+#define VISIBLE_LINES_INIT 1 // allow compiler to remove unused code (PR #582)
+
   // Member initialization: same order as declared in .H file
   //    Any Fl_Text_Display methods should only be called /after/ all
   //    members initialized; avoids methods referencing uninitialized values.
@@ -109,7 +111,7 @@ Fl_Text_Display::Fl_Text_Display(int X, int Y, int W, int H, const char* l)
   mCursorToHint = NO_HINT;
   mCursorStyle = NORMAL_CURSOR;
   mCursorPreferredXPos = -1;
-  mNVisibleLines = 1;
+  mNVisibleLines = VISIBLE_LINES_INIT;
   mNBufferLines = 0;
   mBuffer = NULL;
   mStyleBuffer = NULL;
@@ -118,9 +120,11 @@ Fl_Text_Display::Fl_Text_Display(int X, int Y, int W, int H, const char* l)
   mContinuousWrap = 0;
   mWrapMarginPix = 0;
   mLineStarts = new int[mNVisibleLines];
-  { // This code unused unless mNVisibleLines is ever initialized >1
+#if VISIBLE_LINES_INIT > 1
+  { // Note: this code is unused unless mNVisibleLines is ever initialized > 1
     for (int i=1; i<mNVisibleLines; i++) mLineStarts[i] = -1;
   }
+#endif
   mLineStarts[0] = 0;
   mTopLineNum = 1;
   mAbsTopLineNum = 1;
@@ -486,6 +490,8 @@ void Fl_Text_Display::resize(int X, int Y, int W, int H) {
  */
 void Fl_Text_Display::recalc_display() {
   if (!buffer()) return;
+  // Make sure the display is opened.
+  Fl_Display_Device::display_device();
   // did we have scrollbars initially?
   unsigned int hscrollbarvisible = mHScrollBar->visible();
   unsigned int vscrollbarvisible = mVScrollBar->visible();
@@ -1983,9 +1989,6 @@ int Fl_Text_Display::handle_vline(
 {
   IS_UTF8_ALIGNED2(buffer(), lineStartPos)
 
-  // FIXME: we need to allow two modes for FIND_INDEX: one on the edge of the
-  // FIXME: character for selection, and one on the character center for cursors.
-
   /* STR #2531
 
    The variables startStyle and styleX seem to introduce some additional
@@ -3126,16 +3129,16 @@ void Fl_Text_Display::draw_line_numbers(bool /*clearAll*/) {
 
 #ifndef LINENUM_LEFT_OF_VSCROLL
   int vscroll_w = mVScrollBar->visible() ? mVScrollBar->w() : 0;
-  if (scrollbar_align()&FL_ALIGN_LEFT)
+  if (scrollbar_align() & FL_ALIGN_LEFT)
     xoff += vscroll_w;
 #endif
 
   Fl_Color fgcolor = isactive ? linenumber_fgcolor() : fl_inactive(linenumber_fgcolor());
   Fl_Color bgcolor = isactive ? linenumber_bgcolor() : fl_inactive(linenumber_bgcolor());
   fl_push_clip(x() + xoff,
-               y() + yoff,
+               y() + Fl::box_dy(box()),
                mLineNumWidth,
-               h() - Fl::box_dw(box()) - hscroll_h);
+               h() - Fl::box_dh(box()));
   {
     // Set background color for line number area -- LZA / STR# 2621
     // Erase background
@@ -3172,6 +3175,13 @@ void Fl_Text_Display::draw_line_numbers(bool /*clearAll*/) {
       Y += lineHeight;
     }
   }
+  // fill the void area to the left of the horizontal scrollbar that exists
+  // above or beneath the line number display (when on) with background color
+  fl_color(FL_BACKGROUND_COLOR);
+  if (scrollbar_align() & FL_ALIGN_TOP)
+    fl_rectf(x() + xoff, y() + Fl::box_dy(box()), mLineNumWidth, hscroll_h);
+  else
+    fl_rectf(x() + xoff, y() + h() - hscroll_h - Fl::box_dy(box()), mLineNumWidth, hscroll_h + Fl::box_dy(box()));
   fl_pop_clip();
 }
 
@@ -3879,7 +3889,7 @@ void Fl_Text_Display::draw(void) {
     if (mVScrollBar->visible() && mHScrollBar->visible())
       fl_rectf(mVScrollBar->x(), mHScrollBar->y(),
                mVScrollBar->w(), mHScrollBar->h(),
-               FL_GRAY);
+               FL_BACKGROUND_COLOR);
   }
   else if (damage() & (FL_DAMAGE_SCROLL | FL_DAMAGE_EXPOSE)) {
     //    printf("blanking previous cursor extrusions at Y: %d\n", mCursorOldY);
@@ -3962,7 +3972,42 @@ void Fl_Text_Display::draw(void) {
   fl_pop_clip();
 }
 
-
+// GitHub Issue #196: internal selection and visible selection can run out of
+// sync, giving the user unexpected keyboard selection. The code block below
+// captures that and fixes it.
+// - set pos to the drag target postion or -1 if we don't know
+// - if pos is -1, and key is not -1, key can be set to indicate a direction
+//   (e.g. FL_Left)
+// return 0 if nothing changed, return 1 if dragPos or mCursorPos were modified
+int fl_text_drag_prepare(int pos, int key, Fl_Text_Display* d) {
+  if (d->buffer()->selected()) {
+    int start, end;
+    d->buffer()->selection_position(&start, &end);
+    if ( (d->dragPos!=start || d->mCursorPos!=end) && (d->dragPos!=end || d->mCursorPos!=start) ) {
+      if (pos!=-1) {
+        if (pos<start) {
+          d->mCursorPos = start;
+          d->dragPos = end;
+        } else {
+          d->mCursorPos = end;
+          d->dragPos = start;
+        }
+      } else if (key!=-1) {
+        switch (key) {
+          case FL_Home: case FL_Left: case FL_Up: case FL_Page_Up:
+            d->dragPos = end; d->mCursorPos = start; break;
+          default:
+            d->dragPos = start; d->mCursorPos = end; break;
+        }
+      } else {
+        d->dragPos = start;
+        d->mCursorPos = end;
+      }
+      return 1;
+    }
+  }
+  return 0;
+}
 
 // this processes drag events due to mouse for Fl_Text_Display and
 // also drags due to cursor movement with shift held down for
@@ -4080,8 +4125,12 @@ int Fl_Text_Display::handle(int event) {
       }
       if (Fl_Group::handle(event)) return 1;
       if (Fl::event_state()&FL_SHIFT) {
-        if (!buffer()->primary_selection()->selected())
-            dragPos = insert_position();
+        if (buffer()->primary_selection()->selected()) {
+          int pos = xy_to_position(Fl::event_x(), Fl::event_y(), CURSOR_POS);
+          fl_text_drag_prepare(pos, -1, this);
+        } else {
+          dragPos = insert_position();
+        }
         return handle(FL_DRAG);
       }
       dragging = 1;
@@ -4115,6 +4164,7 @@ int Fl_Text_Display::handle(int event) {
       if (dragType==DRAG_START_DND) {
         if (!Fl::event_is_click() && Fl::dnd_text_ops()) {
           const char* copy = buffer()->selection_text();
+          Fl::copy(copy, (int)strlen(copy));
           Fl::screen_driver()->dnd(1);
           free((void*)copy);
         }

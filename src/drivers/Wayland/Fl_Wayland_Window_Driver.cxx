@@ -19,7 +19,7 @@
 #include "Fl_Wayland_Window_Driver.H"
 #include "Fl_Wayland_Screen_Driver.H"
 #include "Fl_Wayland_Graphics_Driver.H"
-#include "Fl_Wayland_System_Driver.H"
+#include "../Unix/Fl_Unix_System_Driver.H"
 #include <wayland-cursor.h>
 #include "../../../libdecor/src/libdecor.h"
 #include "xdg-shell-client-protocol.h"
@@ -50,7 +50,7 @@ extern "C" {
 #define fl_max(a,b) ((a) > (b) ? (a) : (b))
 #define fl_min(a,b) ((a) < (b) ? (a) : (b))
 
-#if !FLTK_USE_X11
+#if !defined(FLTK_USE_X11)
 Window fl_window = 0;
 #endif
 
@@ -322,24 +322,6 @@ void Fl_Wayland_Window_Driver::capture_titlebar_and_borders(Fl_RGB_Image*& top, 
   top->scale(pWindow->w(), htop);
 }
 
-// used only to support progressive drawing
-static void surface_frame_done(void *data, struct wl_callback *cb, uint32_t time);
-
-static const struct wl_callback_listener surface_frame_listener = {
-  .done = surface_frame_done,
-};
-
-static void surface_frame_done(void *data, struct wl_callback *cb, uint32_t time) {
-  struct wld_window *window = (struct wld_window *)data;
-//fprintf(stderr,"surface_frame_done:  destroy cb=%p draw_buffer_needs_commit=%d\n", cb, window->buffer->draw_buffer_needs_commit);
-  wl_callback_destroy(cb);
-  window->buffer->cb = NULL;
-  if (window->buffer->draw_buffer_needs_commit) {
-//fprintf(stderr,"surface_frame_done: new cb=%p \n", window->buffer->cb);
-    Fl_Wayland_Graphics_Driver::buffer_commit(window, &surface_frame_listener);
-  }
-}
-
 
 // make drawing go into this window (called by subclass flush() impl.)
 void Fl_Wayland_Window_Driver::make_current() {
@@ -358,7 +340,7 @@ void Fl_Wayland_Window_Driver::make_current() {
   // to support progressive drawing
   if ( (!Fl_Wayland_Window_Driver::in_flush) && window->buffer && (!window->buffer->cb)) {
     //fprintf(stderr, "direct make_current: new cb=%p\n", window->buffer->cb);
-    Fl_Wayland_Graphics_Driver::buffer_commit(window, &surface_frame_listener);
+    Fl_Wayland_Graphics_Driver::buffer_commit(window);
   }
 
   Fl_Wayland_Window_Driver::wld_window = window;
@@ -385,18 +367,6 @@ void Fl_Wayland_Window_Driver::make_current() {
   if (Fl::cairo_autolink_context()) Fl::cairo_make_current(pWindow);
 #endif
 }
-
-
-// used to support regular drawing
-static void surface_frame_one_shot(void *data, struct wl_callback *cb, uint32_t time) {
-  wl_callback_destroy(cb);
-  struct wld_window *window = (struct wld_window *)data;
-  window->buffer->cb = NULL;
-}
-
-static const struct wl_callback_listener surface_frame_listener_one_shot = {
-  .done = surface_frame_one_shot,
-};
 
 
 void Fl_Wayland_Window_Driver::flush() {
@@ -437,7 +407,7 @@ void Fl_Wayland_Window_Driver::flush() {
   Fl_Window_Driver::flush();
   Fl_Wayland_Window_Driver::in_flush = false;
   if (window->buffer->cb) wl_callback_destroy(window->buffer->cb);
-  Fl_Wayland_Graphics_Driver::buffer_commit(window, &surface_frame_listener_one_shot, false);
+  Fl_Wayland_Graphics_Driver::buffer_commit(window, false);
 }
 
 
@@ -480,7 +450,7 @@ void Fl_Wayland_Window_Driver::hide() {
       wld_win->frame = NULL;
       wld_win->xdg_surface = NULL;
     } else {
-      if (wld_win->kind == POPUP) {
+      if (wld_win->kind == POPUP && wld_win->xdg_popup) {
         popup_done(wld_win, wld_win->xdg_popup);
         wld_win->xdg_popup = NULL;
       }
@@ -934,6 +904,12 @@ static void popup_done(void *data, struct xdg_popup *xdg_popup) {
   }
 #endif
   xdg_popup_destroy(xdg_popup);
+  // The sway compositor calls popup_done directly and hides the menu
+  // when the app looses focus.
+  // Thus, we hide the window so FLTK and Wayland are in matching states.
+  struct wld_window *window = (struct wld_window*)data;
+  window->xdg_popup = NULL;
+  window->fl_win->hide();
 }
 
 static const struct xdg_popup_listener popup_listener = {
@@ -953,25 +929,8 @@ static Fl_Window *calc_transient_parent(int &center_x, int &center_y) {
   Fl_Window *top = Fl::first_window()->top_window();
   while (top && top->user_data() == &Fl_Screen_Driver::transient_scale_display)
    top = Fl::next_window(top);
-  Fl_Window *target = top;
-  // search if top's center belongs to one of its subwindows
   center_x = top->w()/2; center_y = top->h()/2;
-  while (target) {
-    Fl_Window *child = Fl::first_window();
-    while (child) {
-      if (child->window() == target && child->user_data() != &Fl_Screen_Driver::transient_scale_display &&
-            child->x() <= center_x && child->x()+child->w() > center_x &&
-            child->y() <= center_y && child->y()+child->h() > center_y) {
-          break; // child contains the center of top
-      }
-      child = Fl::next_window(child);
-    }
-    if (!child) break; // no more subwindow contains the center of top
-    target = child;
-    center_x -= child->x(); // express center coordinates relatively to child
-    center_y -= child->y();
-  }
-  return target;
+  return top;
 }
 
 
@@ -997,6 +956,7 @@ Fl_X *Fl_Wayland_Window_Driver::makeWindow()
   Fl_Wayland_Screen_Driver::output *output;
   wait_for_expose_value = 1;
 
+  if (pWindow->parent() && !pWindow->window()) return NULL;
   if (pWindow->parent() && !pWindow->window()->shown()) return NULL;
 
   new_window = (struct wld_window *)calloc(1, sizeof *new_window);
@@ -1084,7 +1044,6 @@ Fl_X *Fl_Wayland_Window_Driver::makeWindow()
     float f = Fl::screen_scale(pWindow->top_window()->screen_num());
     wl_subsurface_set_position(new_window->subsurface, pWindow->x() * f, pWindow->y() * f);
     wl_subsurface_set_desync(new_window->subsurface); // important
-    wl_subsurface_place_above(new_window->subsurface, parent->wl_surface);
     // next 3 statements ensure the subsurface will be mapped because:
     // "A sub-surface becomes mapped, when a non-NULL wl_buffer is applied and the parent surface is mapped."
     new_window->configured_width = pWindow->w();
@@ -1617,6 +1576,12 @@ Fl_Window *fl_wl_find(struct wld_window *xid) {
 
 struct wld_window *fl_wl_xid(const Fl_Window *win) {
   return (struct wld_window *)Fl_Window_Driver::xid(win);
+}
+
+
+struct wl_compositor *fl_wl_compositor() {
+  Fl_Wayland_Screen_Driver *screen_driver = (Fl_Wayland_Screen_Driver*)Fl::screen_driver();
+  return screen_driver->wl_compositor;
 }
 
 

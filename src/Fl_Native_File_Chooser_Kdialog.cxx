@@ -18,7 +18,7 @@
 #include <FL/Fl_Native_File_Chooser.H>
 #include "Fl_Native_File_Chooser_Kdialog.H"
 #include "Fl_Window_Driver.H"
-#include "drivers/Unix/Fl_Unix_System_Driver.H"
+#include "drivers/Unix/Fl_Unix_Screen_Driver.H"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,31 +67,9 @@ static int fnfc_dispatch(int /*event*/, Fl_Window* /*win*/) {
 }
 
 
-int Fl_Kdialog_Native_File_Chooser_Driver::show() {
+char *Fl_Kdialog_Native_File_Chooser_Driver::build_command() {
   const char *option;
   switch (_btype) {
-    case Fl_Native_File_Chooser::BROWSE_MULTI_DIRECTORY: {
-      // BROWSE_MULTI_DIRECTORY is not supported by kdialog, run GTK chooser instead
-      Fl_Native_File_Chooser fnfc(Fl_Native_File_Chooser::BROWSE_MULTI_DIRECTORY);
-      fnfc.title( title() );
-      fnfc.directory(directory());
-      fnfc.preset_file(preset_file());
-      fnfc.filter(filter());
-      fnfc.options(options());
-      int retval = fnfc.show();
-      for (int i = 0; i < _tpathnames; i++) delete[] _pathnames[i];
-      delete[] _pathnames; _pathnames = NULL;
-      _tpathnames = fnfc.count();
-      if (_tpathnames && retval == 0) {
-        _pathnames = new char*[_tpathnames];
-        for (int i = 0; i < _tpathnames; i++) {
-          _pathnames[i] = new char[strlen(fnfc.filename(i))+1];
-          strcpy(_pathnames[i], fnfc.filename(i));
-        }
-      }
-      return retval;
-    }
-      break;
     case Fl_Native_File_Chooser::BROWSE_DIRECTORY:
       option = "--getexistingdirectory";
       break;
@@ -126,6 +104,34 @@ int Fl_Kdialog_Native_File_Chooser_Driver::show() {
              " \"%s\" ", _parsedfilt);
   }
   strcat(command, "2> /dev/null"); // get rid of stderr output
+  return command;
+}
+
+
+int Fl_Kdialog_Native_File_Chooser_Driver::show() {
+  if (_btype == Fl_Native_File_Chooser::BROWSE_MULTI_DIRECTORY) {
+      // BROWSE_MULTI_DIRECTORY is not supported by kdialog, run GTK chooser instead
+      Fl_Native_File_Chooser fnfc(Fl_Native_File_Chooser::BROWSE_MULTI_DIRECTORY);
+      fnfc.title( title() );
+      fnfc.directory(directory());
+      fnfc.preset_file(preset_file());
+      fnfc.filter(filter());
+      fnfc.options(options());
+      int retval = fnfc.show();
+      for (int i = 0; i < _tpathnames; i++) delete[] _pathnames[i];
+      delete[] _pathnames; _pathnames = NULL;
+      _tpathnames = fnfc.count();
+      if (_tpathnames && retval == 0) {
+        _pathnames = new char*[_tpathnames];
+        for (int i = 0; i < _tpathnames; i++) {
+          _pathnames[i] = new char[strlen(fnfc.filename(i))+1];
+          strcpy(_pathnames[i], fnfc.filename(i));
+        }
+      }
+      return retval;
+  }
+
+  char *command = build_command();
 //puts(command);
   FILE *pipe = popen(command, "r");
   fnfc_pipe_struct data;
@@ -136,14 +142,14 @@ int Fl_Kdialog_Native_File_Chooser_Driver::show() {
     Fl_Event_Dispatch old_dispatch = Fl::event_dispatch();
     // prevent FLTK from processing any event
     Fl::event_dispatch(fnfc_dispatch);
-    void *control = ((Fl_Unix_System_Driver*)Fl::system_driver())->control_maximize_button(NULL);
+    void *control = ((Fl_Unix_Screen_Driver*)Fl::screen_driver())->control_maximize_button(NULL);
     // run event loop until pipe finishes
     while (data.fd >= 0) Fl::wait();
     Fl::remove_fd(fileno(pipe));
     pclose(pipe);
     // return to previous event processing by FLTK
     Fl::event_dispatch(old_dispatch);
-    if (control) ((Fl_Unix_System_Driver*)Fl::system_driver())->control_maximize_button(control);
+    if (control) ((Fl_Unix_Screen_Driver*)Fl::screen_driver())->control_maximize_button(control);
     if (data.all_files) {
       // process text received from pipe
       if (data.all_files[strlen(data.all_files)-1] == '\n') data.all_files[strlen(data.all_files)-1] = 0;
@@ -243,7 +249,7 @@ void Fl_Kdialog_Native_File_Chooser_Driver::filter(const char *f) {
   while (part) {
     char *p = parse_filter(part);
     _parsedfilt = strapp(_parsedfilt, p);
-    _parsedfilt = strapp(_parsedfilt, "\\n");
+    _parsedfilt = strapp(_parsedfilt, "\n");
     delete[] p;
     _nfilters++;
     part = strtok_r(NULL, "\n", &ptr);

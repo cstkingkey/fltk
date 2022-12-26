@@ -1,7 +1,7 @@
 //
 // Definition of Windows system driver for the Fast Light Tool Kit (FLTK).
 //
-// Copyright 1998-2021 by Bill Spitzak and others.
+// Copyright 1998-2022 by Bill Spitzak and others.
 //
 // This library is free software. Distribution and use rights are outlined in
 // the file "COPYING" which should have been included with this file.  If this
@@ -1025,4 +1025,8 @@ void Fl_WinAPI_System_Driver::unlock() {
 
 void Fl_WinAPI_System_Driver::awake(void* msg) {
   PostThreadMessage( main_thread, fl_wake_msg, (WPARAM)msg, 0);
+}
+
+int Fl_WinAPI_System_Driver::close_fd(int fd) {
+  return _close(fd);
 }
